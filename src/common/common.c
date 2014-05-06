@@ -169,6 +169,8 @@ int ring_buffer_init(RingBufferContext* ctx, int size)
 		ctx->buffer_size = size;
 		ctx->data_ptr = ctx->buffer_base;
 		ctx->data_size = 0;
+		ctx->d_begin = 0;
+		ctx->d_end = size;
 	}
 	return ctx->buffer_base ? 0 : -1;
 }
@@ -213,6 +215,21 @@ int ring_buffer_clear(RingBufferContext* ctx)
 	pthread_mutex_unlock(&ctx->lock);
 	return 0;
 }
+
+int64_t ring_buffer_d_begin(RingBufferContext* ctx) 
+{
+	pthread_mutex_lock(&ctx->lock);
+	int64_t ret = ctx->d_begin;
+	pthread_mutex_unlock(&ctx->lock);
+	return ret;
+}
+
+void ring_buffer_d_begin_set(RingBufferContext* ctx, int64_t)
+{
+	pthread_mutex_lock(&ctx->lock);
+	int64_t ret = ctx->d_begin;
+	pthread_mutex_unlock(&ctx->lock);
+} 
 
 /* tail_buffer API */
 int tail_buffer_init(TailBufferContext *ttx, int size)
@@ -397,6 +414,50 @@ int buffer_read(BufferContext *tx, uint8_t *buffer, int size)
 		return -3;
 	}
 	
+	if(cur_size >= ttx->d_begin && cur_size < ttx->d_end) {
+		ttx->data_ptr_r = ttx->data_base + (cur_size - ttx->d_begin);
+		ret = tail_buffer_read(ttx, buffer, nsize);
+		if(ret != 0){
+			pthread_mutex_unlock(&tx->iolock);
+			return -1; //size > tail buffer data size
+		}
+	} else if(cur_size >= rtx->d_begin) {
+		if(cur_size + nsize < rtx->d_end) {
+			ret = ring_buffer_read(rtx, buffer, nsize);
+			if(ret != 0) {
+				pthread_mutex_unlock(&tx->iolock);
+				return -2;
+			} else {
+				rtx->d_begin += nsize;
+				rtx->d_end += nsize;
+			}
+		} else if (cur_size + nsize >= rtx->d_end && rtx->d_end == ttx->d_end) {
+			int size0 = cur_size + nsize - ttx->d_begin;
+			int size1 = nsize - size0;
+			ret = ring_buffer_read(rtx, buffer, size1);
+			if(ret != 0) {
+				pthread_mutex_unlock(&tx->iolock);
+				return -2; //size > tail buffer data size
+			} else {
+				rtx->d_begin += size1;
+				rtx->d_end += size1;
+			}
+			ttx->data_ptr_r = ttx->data_base;
+			ret = tail_buffer_read(ttx, buffer+size1, size0);
+			if(ret != 0) {
+				pthread_mutex_unlock(&tx->iolock);
+				return -1;
+			}
+		} else {
+			tx->flags |= REFRESHRING;
+			return -3;
+		}
+	} else {
+		tx->flags |= REFRESHRING;
+		return -3;
+	}
+	
+	/*
 	if(cur_size >= (tsize - tail_size) && cur_size < tsize) {
 		ttx->data_ptr_r = ttx->data_base + (cur_size+tail_size-tsize);
 		ret = tail_buffer_read(ttx, buffer, nsize);
@@ -411,6 +472,9 @@ int buffer_read(BufferContext *tx, uint8_t *buffer, int size)
 		if(ret != 0) {
 			pthread_mutex_unlock(&tx->iolock);
 			return -2; //size > tail buffer data size
+		} else {
+			rtx->d_begin += size1;
+			rtx->d_end += size1;
 		}
 		ttx->data_ptr_r = ttx->data_base;
 		ret = tail_buffer_read(ttx, buffer+size1, size0);
@@ -423,11 +487,14 @@ int buffer_read(BufferContext *tx, uint8_t *buffer, int size)
 		if(ret != 0) {
 			pthread_mutex_unlock(&tx->iolock);
 			return -2;
+		} else {
+			rtx->d_begin += nsize;
+			rtx->d_end += nsize;
 		}
 	} else {
 		//nothing
 	}
-	
+	*/
 	cur_size += nsize;
 	data_size -= nsize;
 	tx->cur_read_pos = cur_size;
@@ -446,11 +513,36 @@ int buffer_seek(BufferContext *tx, int64_t offset, int whence)
 	return 0;
 }
 
-int64_t buffer_cur_read_size(BufferContext *tx) {
+int64_t buffer_cur_read_pos(BufferContext *tx) 
+{
 	pthread_mutex_lock(&tx->iolock);
 	int64_t size = tx->cur_read_pos;
 	pthread_mutex_unlock(&tx->iolock);
 	return size;
+}
+
+void buffer_cur_read_pos_set(BufferContext *tx, int64_t size) 
+{
+	pthread_mutex_lock(&tx->iolock);
+	tx->cur_read_pos = size;
+	pthread_mutex_unlock(&tx->iolock);
+	//return size;
+}
+
+void buffer_flags_set(BufferContext *tx, int flag)
+{
+	pthread_mutex_lock(&tx->iolock);
+	tx->flags |= flag;
+	pthread_mutex_unlock(&tx->iolock);
+}
+
+int buffer_flags(BufferContext *tx)
+{
+	int flags;
+	pthread_mutex_lock(&tx->iolock);
+	flags = tx->flags;
+	pthread_mutex_unlock(&tx->iolock);
+	return flags;
 }
 
 /* curl API */

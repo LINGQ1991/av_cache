@@ -45,10 +45,13 @@ static inline void query_vsprotocol_env(void)
 #define MULTIMEDIA_ERROR(fmt, arg...) LOG_ERROR(fmt, ##arg)
 #define MULTIMEDIA_FATAL(fmt, arg...) LOG_FATAL(fmt, ##arg)
 
-#define WRTAIL		0x01
-#define WRRING	0x02
-#define TAILFULL	0x04
-#define WRFULL	0x08
+#define WRTAIL				0x01
+#define WRRING			0x02
+#define TAILFULL			0x04
+#define WRFULL			0x08
+#define REFRESHRING 	0x10
+
+#define RING_BUFFER_SIZE 1024*1024
 
 typedef struct {
 	pthread_mutex_t lock;
@@ -57,6 +60,8 @@ typedef struct {
 	int buffer_size;
 	uint8_t* data_ptr;
 	int data_size;
+	int64_t d_begin;
+	int64_t d_end;
 }RingBufferContext;
 
 typedef struct {
@@ -65,6 +70,8 @@ typedef struct {
 	uint8_t *data_base;
 	uint8_t *data_end; 
 	int data_size;
+	int64_t d_begin;
+	int64_t d_end;
 }TailBufferContext;
 
 typedef struct {
@@ -102,7 +109,10 @@ int buffer_read(BufferContext *tx, uint8_t *buffer, int size);
 int buffer_write(BufferContext *tx, uint8_t *buffer, int size, int flag);
 int buffer_seek(BufferContext *tx, int64_t offset, int whence);
 int buffer_free(BufferContext *tx);
-int64_t buffer_cur_read_size(BufferContext *tx);
+int64_t buffer_cur_read_pos(BufferContext *tx);
+void buffer_cur_read_pos_set(BufferContext *tx, int64_t size);
+void buffer_flags_set(BufferContext *tx, int flag);
+int buffer_flags(BufferContext *tx);
 
 enum fcurl_type_e {
   CFTYPE_NONE=0,

@@ -20,7 +20,6 @@
 
 #define MAIN_BUFFER_SIZE 32768
 
-
 static int read_data(void *opaque, uint8_t *buf, int buf_size)
 {
 	int ret = 0;
@@ -82,11 +81,11 @@ static int i_read_data(void *opaque, uint8_t *buf, int buf_size)
 	int64_t nsize = (int64_t)buf_size;
 	int ret = 0;
 redo:	
-	if(nsize >= dsize - rsize)
+	if(nsize >= dsize - rsize) //Î´´¦Àí
 		nsize = dsize - rsize;
 	
 	ret = buffer_read(tx, buf, nsize);
-	if(ret == -2) {
+	if(ret == -2 || ret == -3) {
 		usleep(2);
 		goto redo;
 	} else if(ret == -1) {
@@ -104,6 +103,7 @@ static int64_t i_seek_data(void *opaque, int64_t offset, int whence)
 {
 	printf("i_seek_data run, offset:%lld \n", offset);
 	BufferContext *tx = (BufferContext *)opaque;
+	int64_t cur_pos =  buffer_cur_read_pos(tx);
 	if(offset==0 && whence==0)
 		return 0;
 		
@@ -111,13 +111,16 @@ static int64_t i_seek_data(void *opaque, int64_t offset, int whence)
 		return tx->data_size;
 	}
 	if(whence == SEEK_CUR) {
-		tx->cur_read_pos += offset;
+		//tx->cur_read_pos += offset;
+		buffer_cur_read_pos_set(tx, cur_pos+offset);
 	}
 	if(whence == SEEK_END) {
-		tx->cur_read_pos = tx->size + offset;
+		//tx->cur_read_pos = tx->size + offset;
+		buffer_cur_read_pos_set(tx, tx->size + offset);
 	}
 	if(whence == SEEK_SET) {
-		tx->cur_read_pos = offset;
+		//tx->cur_read_pos = offset;
+		buffer_cur_read_pos_set(tx, offset);
 	}
 	
 	return tx->cur_read_pos;
@@ -151,7 +154,7 @@ CFfmpeg::CFfmpeg()
 	audio1 = -1;
 	audio2 = -1;
 	ring_buffer_init(&outputringbuffer, 1024*1024);
-	buffer_init(&cbuffer, 1024*1024*32, 0); //+
+	buffer_init(&cbuffer, 1024*1024, 0); //+
 	oc = NULL;
 	vst = NULL; 
 	ast1 = NULL;

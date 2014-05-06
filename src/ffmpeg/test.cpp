@@ -45,6 +45,8 @@ int input_tail(BufferContext *tx)
 	}
 	curl_fseek(handle, size - tail_size, SEEK_SET);
 	ttx->data_size = tail_size;
+	ttx->d_begin = size - tail_size;
+	ttx->d_end = ttx->d_begin + tail_size;
 	
 	printf("t---curl_fsize = %lld\n", curl_fsize(handle));
 	
@@ -103,6 +105,7 @@ void* thrd_input(void *arg)
 	//pthread_mutex_t *iolock = &(rtx->lock);
 	int64_t dsize = tx->size - ttx->data_size;
 	int64_t rsize,  size;
+	int64_t cur_pos;
 
 	handle = curl_fopen(url, "r");
 	if(!handle) {
@@ -116,19 +119,25 @@ void* thrd_input(void *arg)
 	rsize = 0;
 	while(1) {
 		memset(buffer, 0, sizeof(buffer));
-		if (rsize >= dsize) {
-			printf("i---read full\n");
-			break;
+		int flags = buffer_flags(tx);
+		if( flags & REFRESHRING) { //refresh the ringbuffer¡£
+			ring_buffer_free(rtx);
+			ring_buffer_init(rtx, RING_BUFFER_SIZE);
+			cur_pos = buffer_cur_read_pos(tx);
+			curl_fseek(handle, cur_pos, SEEK_SET);
+			rtx->d_begin = cur_pos;
+			rtx->d_end = cur_pos + RING_BUFFER_SIZE;
+			buffer_flags_set(tx, flags & ~RING_BUFFER_SIZE);
 		}
 		//read url data
 		size = sizeof(buffer);
-		if(size >= (dsize - rsize))
-			size = dsize - rsize;
+		//if(size >= (dsize - rsize))
+		//	size = dsize - rsize;
 		nread = curl_fread(buffer, 1, size, handle);
 		if(nread == 0) {
 			if (rsize >= dsize) {
 				printf("i----read full\n");
-				break;
+				//break;
 			} else {
 				printf("i---error: rsize = %lld\t\tdsize = %lld\t\tnread = %d\n", rsize, dsize, nread);
 				break;
@@ -137,28 +146,25 @@ void* thrd_input(void *arg)
 			printf("curl is not running\n");
 			break;
 		} else {
-		
+			//nothing
 		}
 		
 		//input data to ringbuffer
 		i = 0;
 	wrdo:
-		//pthread_mutex_lock(iolock);
 		ret = buffer_write(tx, buffer, nread, WRRING);
 		if(ret != 0) {
-			//pthread_mutex_unlock(iolock);
-			i++;
+			//i++;
 			usleep(2);
-			if(i>5)
-				break;
+			//if(i>10)
+				//break;
 			//printf("i---goto write again\n");
 			goto wrdo;
 		}
-		//pthread_mutex_unlock(iolock);
 		rsize += nread;
 	}
 	
-	tx->flags |= WRFULL;
+	tx->flags |= WRFULL; 
 	curl_fclose(handle);
 	pthread_exit(NULL);
 	//return (void *)(0);
