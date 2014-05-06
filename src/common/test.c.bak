@@ -1,0 +1,324 @@
+#include <stdio.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <pthread.h>
+
+#include "common.h"
+
+#define TAIL_SIZE_MAX 15*1024*1024	//15M
+#define TAIL_SIZE_MIN 1*1024*1024 	//1M
+#define TAIL_SIZE 20	//5%	
+
+RingBufferContext ring_buffer;
+pthread_mutex_t iolock;
+uint8_t *tail_buffer;
+URL_FILE *handle;
+FILE *outf;
+const char *url;
+int g_flags;
+int g_t_size = 0; //tail size
+int g_size = 0; //data size
+
+static int read_data(void *opaque, uint8_t *buf, int buf_size)
+{
+	int ret = 0;
+	RingBufferContext *ctx = (RingBufferContext*)opaque;
+	int datsize = ring_buffer_datasize(ctx);
+	int size = datsize;
+	if(size <= 0)
+		return 0;
+	else if(size > buf_size)
+		size = buf_size;
+	//printf("avio read %p to %p, reqsize=%d, datsize=%d, rest=%d\n", opaque, buf, buf_size, datsize, datsize-buf_size);
+	ret = ring_buffer_read(ctx, buf, size);
+	if(ret == 0)
+		ret = size;
+	else
+		ret = 0;
+	return ret;
+}
+
+void c_init()
+{
+	ring_buffer_init(&ring_buffer, 1024*1024);
+	pthread_mutex_init(&iolock, NULL);
+	g_flags = 0;
+	g_size =0;
+	g_t_size = 0;
+}
+
+void c_destroy()
+{
+	ring_buffer_free(&ring_buffer);
+	pthread_mutex_destroy(&iolock);
+	
+	memset(tail_buffer, 0, g_t_size);
+	free(tail_buffer);
+	tail_buffer = NULL;
+}
+
+/* input tail data to tail_buffer */
+int input_tail(void)
+{
+	//int ret = 0;
+	int size = 0, tail_size = 0, rsize = 0;
+	int nread;
+	uint8_t buffer[32768];
+	
+	handle = curl_fopen(url, "r");
+	if(!handle) {
+		printf("couldn't curl_fopen() url %s\n", url);
+		fclose(outf);
+		return 2;
+	}
+	
+	/* input tail data to tail_buffer */
+	size = curl_fsize(handle);
+	g_size = size;
+	printf("t---size=%d\n", size);
+	tail_size = size / TAIL_SIZE;
+	
+	if(tail_size >TAIL_SIZE_MAX) {
+		tail_size = TAIL_SIZE_MAX;
+		curl_fseek(handle, (size - tail_size), SEEK_SET);
+		//printf("test1\n");
+	} else if (tail_size < TAIL_SIZE_MIN) {
+		tail_size = size;
+		//printf("test2\n");
+		//curl_fseek(handle, (size - tail_size), SEEK_SET);
+		curl_fseek(handle, size - tail_size, SEEK_SET); 
+	} else {
+		//nothing;
+		//printf("test3\n");
+		curl_fseek(handle, size - tail_size, SEEK_SET);
+	}
+	g_t_size = tail_size;
+	printf("t---g_t_size = %d\n", g_t_size);
+	printf("t---curl_fsize = %lld\n", curl_fsize(handle));
+	
+	tail_buffer = (uint8_t *)malloc(tail_size + 1); // free in the end
+	memset(tail_buffer, 0, tail_size);
+	//ret = curl_fseek(handle, (size - tail_size), SEEK_SET); // seek 
+	
+	rsize = 0;
+	while(1) {
+		memset(buffer, 0, sizeof(buffer));
+		if(sizeof(buffer) <= (tail_size - rsize)) {
+			nread = curl_fread(buffer, 1,sizeof(buffer), handle);
+		} else {
+			nread = curl_fread(buffer, 1,(tail_size - rsize), handle);
+		}
+		//nread = curl_fread(buffer, 1,sizeof(buffer), handle);
+		//if(nread != 32768) {
+		//	printf("nread = %d\n", nread);
+		//}
+		if(nread == 0) {
+			printf("tail read full\n");
+			break;
+		}
+		else if (nread < 0) {
+			printf("curl is not running\n");
+			break;
+			//continue;
+			//pthread_exit(NULL);
+			//return -1;
+		}
+		else {
+			memcpy(tail_buffer+rsize, buffer, nread);
+			rsize += nread;
+		}
+		
+		if(rsize >= tail_size) 
+			break;
+	}
+	printf("t---rsize = %d\n", rsize);
+	curl_fclose(handle);
+	
+	return 0;
+}
+
+void* thrd_input(void *arg)
+{
+	int ret = 0;
+	int size = 0, rsize = 0;
+	int nread;
+	uint8_t buffer[32768];
+	
+	handle = curl_fopen(url, "r");
+	if(!handle) {
+		printf("couldn't curl_fopen() url %s\n", url);
+		fclose(outf);
+		//return (void *)(2);
+		pthread_exit(NULL);
+	}
+	
+	/* input data to ringbuffer */
+	//size = curl_fsize(handle);
+	size = g_size;
+	printf("i---size=%d\n", size);
+	rsize = 0;
+	while(1) {
+	curlRead:
+		//printf("thrd_input\n");
+		memset(buffer, 0, sizeof(buffer));
+		if(sizeof(buffer) <= (size - rsize - g_t_size)) {
+			nread = curl_fread(buffer, 1,sizeof(buffer), handle);
+		} else {
+			nread = curl_fread(buffer, 1,(size - rsize - g_t_size), handle);
+		}	
+		//nread = curl_fread(buffer, 1,sizeof(buffer), handle);
+		if(nread == 0) {
+			if(rsize == (size - g_t_size)) {
+				printf("read full\n");
+				break;
+			} else {
+				printf("i---nread = %d\n", nread);
+				usleep(1);
+				goto curlRead;
+			}
+		}
+		else if (nread < 0) {
+			printf("curl is not running\n");
+			break;
+			//pthread_exit(NULL);
+		}
+		else {
+			rsize += nread;
+		wrdo:	
+			pthread_mutex_lock(&iolock);
+			if(ring_buffer_freesize(&ring_buffer) < nread){
+				pthread_mutex_unlock(&iolock);
+				usleep(1);
+				goto wrdo;
+			} else {
+				ret = ring_buffer_write(&ring_buffer, buffer, nread);
+				pthread_mutex_unlock(&iolock);
+				if(ret < 0) {
+					usleep(1);
+					goto wrdo;
+				}
+			}
+		}
+		
+		if(rsize == (size - g_t_size)) // read size-g_t_size;
+			break;
+	}
+	
+	g_flags = 1;
+	curl_fclose(handle);
+	pthread_exit(NULL);
+	//return (void *)(0);
+}
+
+void *thrd_output(void *arg)
+{
+	int ret = 0;
+	int size = 0, rsize = 0;
+	int nread;
+	int fd;
+	uint8_t buffer[32768];
+	
+	fd = open("./1.mkv", O_WRONLY | O_CREAT | O_TRUNC);
+	if(fd < 0){
+		printf("Cannot open file.\n");
+		pthread_exit(NULL);
+		//return (void*)(-1);
+	}
+	
+	size = g_size;
+	
+	while(1) {
+		//printf("thrd_output\n");
+		memset(buffer, 0, sizeof(buffer));
+	redo:
+		if(rsize < size - g_t_size){
+			if(sizeof(buffer) < (size - rsize - g_t_size)) {
+				pthread_mutex_lock(&iolock);
+				ret = read_data(&ring_buffer, buffer, sizeof(buffer));
+				pthread_mutex_unlock(&iolock);
+			} else {
+				pthread_mutex_lock(&iolock);
+				ret = read_data(&ring_buffer, buffer, size - rsize - g_t_size);
+				pthread_mutex_unlock(&iolock);
+			}
+			if(ret == 0) {
+				if(1 == g_flags && rsize == size)
+					break;
+				else {
+					usleep(1);
+					goto redo;
+				}
+			}
+			nread = ret;
+			rsize += nread;
+		} else if (rsize >= (size - g_t_size) && rsize < size){
+			//printf("1--rsize = %d\nsize-g_t_size = %d\ng_t_size = %d\nsize = %d\n", rsize, size - g_t_size, g_t_size, size);
+			if(sizeof(buffer) < (size - rsize)) {
+				memcpy(buffer, tail_buffer+(rsize + g_t_size -size), sizeof(buffer));
+				nread = sizeof(buffer);
+				rsize += nread; 
+			} else{
+				memcpy(buffer, tail_buffer +(rsize + g_t_size -size), (size - rsize));
+				nread = size - rsize;
+				rsize += nread;
+			}
+		} else if (rsize == size) {
+			break;
+		} else {
+			printf("error : rsize > size\n");
+		}
+		
+		write(fd, buffer, nread);
+	}
+	
+	pthread_exit(NULL);
+	//return (void *)(0);
+}
+
+int main(int argc, char **argv)
+{
+	int ret;
+	pthread_t input_id, output_id;
+	
+	if(argc < 2)
+		url="http://localhost/xampp/test/10003196.mkv";/* default to testurl */
+	else
+		url=argv[1];/* use passed url */
+	
+	c_init();
+
+	ret = input_tail();
+	if(ret == -1) {
+		printf("input tail failed\n");
+	} else {
+		printf("input tail sucessed\n");
+	}	
+	
+	if(pthread_create(&input_id, NULL, thrd_input, NULL) != 0) {
+		printf("Create input_thread error!\n");
+		return -1;
+	}
+	if(pthread_create(&output_id, NULL, thrd_output, NULL) != 0) {
+		printf("Create output_thread error!\n");
+		return -1;
+	}
+	
+	// 等待线程input_id退出
+	if (pthread_join(input_id,NULL) != 0) {
+		printf("Join input_thread error!\n");
+		return -1;
+	}else
+		printf("input_thread Joined!\n");
+		
+	// 等待线程output_id退出
+	if (pthread_join(output_id,NULL) != 0) {
+		printf("Join output_thread error!\n");
+		return -1;
+	}else
+		printf("output_thread Joined!\n");
+	
+	//printf("tail_buffer: %s\n", tail_buffer);
+	c_destroy();
+	
+	return 0;
+}
